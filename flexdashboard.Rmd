@@ -1,0 +1,392 @@
+---
+title: "SMART Dashboard"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    source_code: embed
+    theme: cosmo
+    logo: "michigan-logo.png"
+    favicon: "michigan-logo.png"
+    css: "inst/assets/styles-auth.css"
+vertical_layout: fill
+runtime: shiny
+---
+
+<style>
+.navbar-logo.pull-left {
+  padding-top:4px;
+}
+.navbar {
+  background-color:#003D79;
+  border-color:white;
+}
+.navbar-brand {
+color:white!important;
+}
+
+</style>   
+
+<style type="text/css">
+
+.chart-title { /* chart_title */
+  font-size: 125%
+}
+
+.panel-auth {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background-color: #FFF;
+    opacity: 1;
+    z-index: 99997;
+    overflow-x: hidden;
+    overflow-y: scroll;
+}
+
+</style>
+
+```{r global, include=FALSE}
+# load data in 'global' chunk so it can be shared by all users of the dashboard
+library(shinymanager)
+
+# define some credentials (you can also use sqlite database)
+credentials <- data.frame(
+  user = c("dashboard-user"),
+  password = c("SMART2023"),
+  stringsAsFactors = FALSE
+)
+```
+
+```{r setup, include=FALSE}
+# packages
+library(flexdashboard)
+library(shiny)
+library(plotly)
+library(RColorBrewer)
+library(stringr)
+library(shinythemes)
+library(shinyTime)
+library(DT)
+library(highcharter)
+library(readr)
+library(ggsankey)
+
+# data and functions
+source('redcap-data.R')
+source('functions.R')
+```
+
+```{r password}
+auth_ui(id = "auth")
+
+auth <- callModule(
+  module = auth_server,
+  id = "auth",
+  check_credentials = check_credentials(credentials)
+)
+```
+
+Screening & Enrollment
+================================================================================
+
+Row {data-height=30%}
+--------------------------------------------------------------------------------
+
+### Enrolled
+
+```{r out.width = '100%', out.height = '100%'}
+
+valueBox(
+  value = sprintf('%i (%.0f%%)', n_enrolled, n_enrolled_percent),
+  caption = sprintf('enrolled as of %s', format(Sys.Date(), '%B %d, %Y')),
+  color = 'lightgreen',
+  icon = 'ion-android-checkbox-outline'
+)
+
+```
+
+### Exclusions due to Eligibility
+
+```{r out.width = '100%', out.height = '100%'}
+
+valueBox(
+  value = sprintf('%i (%.0f%%)', n_excluded, n_excluded_percent),
+  caption = 'excluded due to eligilibity requirements',
+  color = 'orange',
+  icon = 'ion-ios-flag'
+)
+
+```
+
+### Exclusions due to Informed Consent Refusal
+
+```{r out.width = '100%', out.height = '100%'}
+
+valueBox(
+  value = sprintf('%i (%.0f%%)', n_refused, n_refused_percent),
+  caption = 'refused informed consent',
+  color = 'orange',
+  icon = 'ion-android-clipboard'
+)
+
+```
+
+Row {data-height=70%}
+--------------------------------------------------------------------------------
+
+### Reasons for Exclusion {data-width=50%}
+
+```{r out.width = '100%', out.height = '100%'}
+
+colors <- rev(brewer.pal(n = 4, name = 'Blues'))
+colors <- c(colors[1], colors[3], colors[2], colors[4])
+
+tm_data <- data_to_hierarchical(
+  data = top_exclusion_reasons,
+  group_vars = c(reason_class, reason),
+  size_var = count,
+  colors = colors
+)
+
+hchart(
+  tm_data,
+  type = 'treemap'
+)
+
+```
+
+### Patient Enrollment by Month {data-width=50%}
+
+```{r out.width = '100%', out.height = '100%'}
+
+enrollment_plot <- ggplot(data = screening_by_month, aes(fill = type)) +
+  geom_bar(aes(x = date, y = count, group = type),
+           stat = 'identity',
+           position = position_dodge(0.9),
+           color = 'black'
+  ) +
+  scale_fill_brewer(palette = 'Greens') +
+  xlab('') + ylab('') +
+  theme_bw() +
+  theme(
+    legend.position = 'none'
+  )
+
+ggplotly(enrollment_plot, tooltip = c('x', 'group', 'y'))
+
+```
+
+Treatment Assignment
+================================================================================
+
+### Patient Assignment
+
+```{r}
+
+assign_ui <- fillPage(
+  br(''),
+  # sidebar
+  sidebarLayout(
+    # randomization
+    sidebarPanel(
+      title = 'Inputs',
+      width = 12,
+      textInput(
+        inputId = 'id',
+        label = 'Patient ID (ex: E003)'
+      ),
+      radioButtons(
+        inputId = 'stage',
+        label = 'Stage',
+        choices = c('Stage 1', 'Stage 2'),
+        selected = 'Stage 1'
+      ),
+      actionButton(
+        inputId = 'submit',
+        label = 'Show Assignment')
+    ),
+    # show current data
+    mainPanel(
+      dataTableOutput('responses', height = '5.7em'),
+      dataTableOutput('datetime', height = '5.7em'),
+      width = 12
+    )
+  )
+)
+
+assign_server <- function(input, output, session) {
+
+  # input
+  id <- eventReactive(input$submit, input$id)
+  stage <- eventReactive(input$submit, input$stage)
+
+  current_time <- eventReactive(input$submit, lubridate::now())
+
+  # retrieve row of interest
+  getRow <- reactive({
+    return(get_treatment(id(), stage()))
+  })
+
+  getTime <- reactive({
+    return(current_time())
+  })
+
+  # save row to output
+  output$responses <- renderDataTable(
+    {input$submit
+    datatable(
+      getRow(),
+      rownames = FALSE,
+      colnames = c('Patient ID', 'Treatment'),
+      options = list(
+        paging = FALSE,
+        dom = 't'
+      )
+    )}
+  )
+
+  ## save time
+  output$datetime <- renderDataTable(
+    {input$submit
+    datatable(
+      data.frame(
+        date = as.Date(getTime(), format = "%Y-%m-%d"),
+        time = strftime(getTime(), format="%H:%M:%S")
+      ),
+      rownames = FALSE,
+      colnames = c('Date', 'Time (EST)'),
+      options = list(
+        paging = FALSE,
+        dom = 't'
+      )
+    )}
+  )
+
+}
+
+shinyApp(
+  ui = assign_ui,
+  server = assign_server
+)
+
+```
+
+### Treatment Distribution as of `r format(Sys.Date(), "%B %d, %Y")`
+
+```{r, out.width = '100%', out.height = '100%'}
+
+treatment_one_levels <- c(
+  'IV Methylprednisolone',
+  'Upadacitinib',
+  'IV Methylprednisolone + Upadacitinib'
+)
+
+treatment_two_levels <- c(
+  'Upadacitinib',
+  'Cyclosporine',
+  'Add IV Methylprednisolone',
+  'Switch to IV Methylprednisolone + Cyclosporine',
+  'Escalate to IV Methylprednisolone + Upadacitinib',
+  'Switch to Cyclosporine Rescue'
+)
+
+treatment_distribution <- treatment_distribution %>%
+  mutate(
+    treatment_one = factor(
+      treatment_one,
+      levels = treatment_one_levels
+    ),
+    treatment_two = factor(
+      treatment_two,
+      levels = treatment_two_levels
+    )
+  )
+
+count_data <- treatment_distribution %>%
+  group_by(treatment_one, treatment_two) %>%
+  summarize(count = n()) %>%
+  ungroup() %>%
+  complete(treatment_one, treatment_two, fill = list(count=0)) %>%
+  filter(
+    (treatment_one == 'IV Methylprednisolone' & (treatment_two == 'Upadacitinib' | treatment_two == 'Cyclosporine')) |
+    (treatment_one == 'Upadacitinib' & (treatment_two == 'Add IV Methylprednisolone' | treatment_two == 'Switch to IV Methylprednisolone + Cyclosporine')) |
+    (treatment_one == 'IV Methylprednisolone + Upadacitinib' & (treatment_two == 'Escalate to IV Methylprednisolone + Upadacitinib' | treatment_two == 'Switch to Cyclosporine Rescue')) |
+    is.na(treatment_two)
+  )
+
+test <- count_data %>%
+  make_long(treatment_one, treatment_two, value = count)
+
+counts = count_data$count
+
+treatment_plot <- plot_ly(
+  type = 'sankey',
+  orientation = 'h',
+  node = list(
+    label = c(
+      'Methylpred',
+      'Upa',
+      'Methylpred + Upa',
+      'Add Upa',
+      'Add Cyclo',
+      'Not Assigned',
+      'Add Methylpred',
+      'Switch to Methylpred + Cyclo',
+      'Not Assigned',
+      'Escalate to Methylpred + Upa',
+      'Switch to Cyclo',
+      'Not Assigned'
+    ),
+    color = c('#ea6a47', '#c86cbb', 'skyblue', '#ea6a47', '#ea6a47', '#ea6a47', '#c86cbb', '#c86cbb', '#c86cbb', 'skyblue', 'skyblue', 'skyblue')
+  ),
+  link = list(
+    source = c(0, 0, 0, 1, 1, 1, 2, 2, 2),
+    target = c(3, 4, 5, 6, 7, 8, 9, 10, 11),
+    value = counts
+  ),
+  hoverinfo = "text",
+)
+
+treatment_plot
+
+```
+
+Assessment Times
+================================================================================
+
+### Scheduled Date and Time of Patient Assessments
+
+```{r}
+
+assess_datatable <- datatable(assessment_times)
+
+assess_datatable <- datatable(assessment_times,
+  rownames = FALSE,
+  colnames = c('ID','Start Time', 'Day 1', 'Day 2', 'Day 3', 'Day 4', 'Day 5', 'Day 6', 'Day 30', 'Day 60', 'Day 90'),
+  options = list(
+    order = list(2, 'desc'),
+    dom = 'ft',
+    columnDefs = list(list(visible=FALSE, targets=c(11:19))),
+    pageLength = 1000
+  )
+) %>% formatDate(~start_time + day1 + day2 + day3 + day4 + day5 + day6 + day30 + day60 + day90, method = 'toLocaleString')
+
+for(i in c(1:6, 30, 60, 90)) {
+
+  temp_day_var  = paste0('day', i)
+  temp_time_var = paste0('time_until_day', i)
+
+  assess_datatable <- assess_datatable %>%
+    formatStyle(
+      temp_day_var,
+      temp_time_var,
+      backgroundColor = styleInterval(c(-6, 6), c('white', '#ff0033', 'white'))
+    )
+
+}
+
+renderDataTable(assess_datatable)
+
+```
